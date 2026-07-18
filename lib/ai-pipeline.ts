@@ -298,13 +298,13 @@ Return ONLY the required JSON object.
         continue
       }
 
-      const affectedSegments = [
-        ...new Set(
-          themeInsights.map(
-            (insight) => insight.segment
-          )
-        ),
-      ]
+const affectedSegments: string[] = [
+  ...new Set<string>(
+    themeInsights
+      .map((insight: AtomicInsight) => insight.segment)
+      .filter((segment): segment is string => typeof segment === 'string')
+  ),
+]
 
       const avgConfidence =
         themeInsights.reduce(

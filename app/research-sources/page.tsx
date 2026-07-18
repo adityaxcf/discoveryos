@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { Search, Filter, Upload, Play, X } from 'lucide-react'
+import { Search, Play, X } from 'lucide-react'
 import Link from 'next/link'
 
 interface ResearchSource {

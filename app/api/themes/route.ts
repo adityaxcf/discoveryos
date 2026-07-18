@@ -7,19 +7,45 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url)
     const projectId = searchParams.get('projectId') || 'proj-default'
 
-    const themes = db
-      .prepare('SELECT * FROM themes WHERE project_id = ? ORDER BY opportunity_score DESC')
-      .all(projectId) as any[]
+    const { data, error } = await db
+      .from('themes')
+      .select('*')
+      .eq('project_id', projectId)
+      .order('opportunity_score', { ascending: false })
 
-    const parsed = themes.map((t) => ({
-      ...t,
-      affected_segments: JSON.parse(t.affected_segments || '[]'),
-      score_breakdown: JSON.parse(t.score_breakdown || '{}'),
-    }))
+    if (error) {
+      throw error
+    }
 
-    return NextResponse.json(parsed)
+    const themes = (data || []).map((theme) => ({
+      ...theme,
+
+      // These were stored as JSON strings,
+      // so convert them back into JS objects/arrays.
+      affected_segments:
+        typeof theme.affected_segments === 'string'
+          ? JSON.parse(theme.affected_segments || '[]')
+          : theme.affected_segments || [],
+
+      score_breakdown:
+        typeof theme.score_breakdown === 'string'
+          ? JSON.parse(theme.score_breakdown || '{}')
+          : theme.score_breakdown || {},
+    })) as Theme[]
+
+    return NextResponse.json(themes)
   } catch (error) {
     console.error('Error fetching themes:', error)
-    return NextResponse.json({ error: 'Failed to fetch themes' }, { status: 500 })
+
+    return NextResponse.json(
+      {
+        error: 'Failed to fetch themes',
+        details:
+          error instanceof Error
+            ? error.message
+            : String(error),
+      },
+      { status: 500 }
+    )
   }
 }

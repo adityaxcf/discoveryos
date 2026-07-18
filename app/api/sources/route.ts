@@ -7,13 +7,28 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url)
     const projectId = searchParams.get('projectId') || 'proj-default'
 
-    const sources = db
-      .prepare('SELECT * FROM research_sources WHERE project_id = ? ORDER BY date DESC')
-      .all(projectId) as ResearchSource[]
+    const { data, error } = await db
+      .from('research_sources')
+      .select('*')
+      .eq('project_id', projectId)
+      .order('date', { ascending: false })
+
+    if (error) {
+      throw error
+    }
+
+    const sources = (data || []) as ResearchSource[]
 
     return NextResponse.json(sources)
   } catch (error) {
     console.error('Error fetching sources:', error)
-    return NextResponse.json({ error: 'Failed to fetch sources' }, { status: 500 })
+
+    return NextResponse.json(
+      {
+        error: 'Failed to fetch sources',
+        details: error instanceof Error ? error.message : String(error),
+      },
+      { status: 500 }
+    )
   }
 }

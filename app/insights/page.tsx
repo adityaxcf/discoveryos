@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { Search, Filter, X } from 'lucide-react'
+import { Search, X } from 'lucide-react'
 
 interface Theme {
   id: string
@@ -41,7 +41,7 @@ interface Evidence {
 
 export default function InsightsPage() {
   const [themes, setThemes] = useState<Theme[]>([])
-  const [insights, setInsights] = useState<AtomicInsight[]>([])
+  const [_insights, setInsights] = useState<AtomicInsight[]>([])
   const [filtered, setFiltered] = useState<Theme[]>([])
   const [evidence, setEvidence] = useState<Evidence[]>([])
   const [loading, setLoading] = useState(true)

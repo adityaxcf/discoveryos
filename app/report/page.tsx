@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { Download, Printer, ArrowRight } from 'lucide-react'
+import { Download, Printer } from 'lucide-react'
 
 interface Theme {
   id: string

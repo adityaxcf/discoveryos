@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ScatterChart, Scatter } from 'recharts'
+import { PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ScatterChart, Scatter } from 'recharts'
 import { ArrowRight, Zap } from 'lucide-react'
 import Link from 'next/link'
 
@@ -37,7 +37,7 @@ export default function OverviewPage() {
   })
   const [themes, setThemes] = useState<Theme[]>([])
   const [insights, setInsights] = useState<AtomicInsight[]>([])
-  const [loading, setLoading] = useState(true)
+  const [, setLoading] = useState(true)
 
   useEffect(() => {
     initAndFetch()

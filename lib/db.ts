@@ -1,131 +1,26 @@
-import Database from 'better-sqlite3'
-import path from 'path'
-import fs from 'fs'
+import { createClient } from '@supabase/supabase-js'
 
-const dbPath = path.join(process.cwd(), 'data', 'discoveryos.db')
+const supabaseUrl = process.env.SUPABASE_URL
+const supabaseSecretKey = process.env.SUPABASE_SECRET_KEY
 
-// Ensure data directory exists
-const dataDir = path.dirname(dbPath)
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true })
+if (!supabaseUrl) {
+  throw new Error('Missing SUPABASE_URL')
 }
 
-export const db = new Database(dbPath)
-db.pragma('journal_mode = WAL')
-db.pragma('foreign_keys = ON')
+if (!supabaseSecretKey) {
+  throw new Error('Missing SUPABASE_SECRET_KEY')
+}
 
-export function initializeDatabase() {
-  // ResearchProject table
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS research_projects (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      description TEXT,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
-    )
-  `)
+// Server-side Supabase client.
+// NEVER expose SUPABASE_SECRET_KEY to browser/client code.
+export const db = createClient(supabaseUrl, supabaseSecretKey, {
+  auth: {
+    persistSession: false,
+    autoRefreshToken: false,
+  },
+})
 
-  // ResearchSource table
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS research_sources (
-      id TEXT PRIMARY KEY,
-      project_id TEXT NOT NULL,
-      title TEXT NOT NULL,
-      type TEXT NOT NULL,
-      customer_name TEXT,
-      segment TEXT NOT NULL,
-      date TEXT NOT NULL,
-      raw_content TEXT NOT NULL,
-      analysis_status TEXT DEFAULT 'pending',
-      created_at TEXT NOT NULL,
-      FOREIGN KEY (project_id) REFERENCES research_projects(id)
-    )
-  `)
-
-  // UserSegment table
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS user_segments (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL UNIQUE,
-      description TEXT,
-      value_tier TEXT
-    )
-  `)
-
-  // AtomicInsight table
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS atomic_insights (
-      id TEXT PRIMARY KEY,
-      source_id TEXT NOT NULL,
-      statement TEXT NOT NULL,
-      quote TEXT,
-      sentiment TEXT,
-      confidence REAL,
-      segment TEXT,
-      created_at TEXT NOT NULL,
-      FOREIGN KEY (source_id) REFERENCES research_sources(id)
-    )
-  `)
-
-  // Theme table
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS themes (
-      id TEXT PRIMARY KEY,
-      project_id TEXT NOT NULL,
-      name TEXT NOT NULL,
-      description TEXT,
-      insight_count INTEGER DEFAULT 0,
-      source_count INTEGER DEFAULT 0,
-      affected_segments TEXT,
-      confidence REAL,
-      severity TEXT,
-      business_impact TEXT,
-      opportunity_score REAL DEFAULT 0,
-      score_breakdown TEXT,
-      created_at TEXT NOT NULL,
-      FOREIGN KEY (project_id) REFERENCES research_projects(id)
-    )
-  `)
-
-  // ThemeInsight join table
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS theme_insights (
-      theme_id TEXT NOT NULL,
-      insight_id TEXT NOT NULL,
-      PRIMARY KEY (theme_id, insight_id),
-      FOREIGN KEY (theme_id) REFERENCES themes(id),
-      FOREIGN KEY (insight_id) REFERENCES atomic_insights(id)
-    )
-  `)
-
-  // Evidence table
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS evidence (
-      id TEXT PRIMARY KEY,
-      theme_id TEXT NOT NULL,
-      source_id TEXT NOT NULL,
-      quote TEXT NOT NULL,
-      context TEXT,
-      sentiment TEXT,
-      created_at TEXT NOT NULL,
-      FOREIGN KEY (theme_id) REFERENCES themes(id),
-      FOREIGN KEY (source_id) REFERENCES research_sources(id)
-    )
-  `)
-
-  // AnalysisRun table
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS analysis_runs (
-      id TEXT PRIMARY KEY,
-      project_id TEXT NOT NULL,
-      status TEXT NOT NULL,
-      current_stage TEXT,
-      stages_data TEXT,
-      results TEXT,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      FOREIGN KEY (project_id) REFERENCES research_projects(id)
-    )
-  `)
+// Tables already exist in Supabase, so initialization is no longer needed.
+export async function initializeDatabase() {
+  return
 }

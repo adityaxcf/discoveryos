@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
-import { Evidence } from '@/lib/types'
 
 export async function GET(request: Request) {
   try {
@@ -8,35 +7,68 @@ export async function GET(request: Request) {
     const themeId = searchParams.get('themeId')
     const sourceId = searchParams.get('sourceId')
 
-    let query = 'SELECT * FROM evidence'
-    const params: any[] = []
+    // Supabase can fetch the related source + theme
+    // in the same query using the foreign-key relationships.
+    let query = db
+      .from('evidence')
+      .select(`
+        *,
+        source:research_sources(*),
+        theme:themes(*)
+      `)
+      .order('created_at', { ascending: false })
 
     if (themeId) {
-      query += ' WHERE theme_id = ?'
-      params.push(themeId)
+      query = query.eq('theme_id', themeId)
     } else if (sourceId) {
-      query += ' WHERE source_id = ?'
-      params.push(sourceId)
+      query = query.eq('source_id', sourceId)
     }
 
-    query += ' ORDER BY created_at DESC'
+    const { data, error } = await query
 
-    const evidence = db.prepare(query).all(...params) as any[]
+    if (error) {
+      throw error
+    }
 
-    // Enrich with source information if available
-    const enriched = evidence.map((e) => {
-      const source = db.prepare('SELECT * FROM research_sources WHERE id = ?').get(e.source_id) as any
-      const theme = db.prepare('SELECT * FROM themes WHERE id = ?').get(e.theme_id) as any
-      return {
-        ...e,
-        source,
-        theme,
-      }
-    })
+    const enriched = (data || []).map((item) => ({
+      ...item,
+
+      // Parse JSON fields inside the related theme
+      // so the frontend receives the same structure as before.
+      theme: item.theme
+        ? {
+            ...item.theme,
+
+            affected_segments:
+              typeof item.theme.affected_segments === 'string'
+                ? JSON.parse(
+                    item.theme.affected_segments || '[]'
+                  )
+                : item.theme.affected_segments || [],
+
+            score_breakdown:
+              typeof item.theme.score_breakdown === 'string'
+                ? JSON.parse(
+                    item.theme.score_breakdown || '{}'
+                  )
+                : item.theme.score_breakdown || {},
+          }
+        : null,
+    }))
 
     return NextResponse.json(enriched)
   } catch (error) {
     console.error('Error fetching evidence:', error)
-    return NextResponse.json({ error: 'Failed to fetch evidence' }, { status: 500 })
+
+    return NextResponse.json(
+      {
+        error: 'Failed to fetch evidence',
+        details:
+          error instanceof Error
+            ? error.message
+            : String(error),
+      },
+      { status: 500 }
+    )
   }
 }

@@ -1,49 +1,85 @@
 import { NextResponse } from 'next/server'
-import { db, initializeDatabase } from '@/lib/db'
+import { db } from '@/lib/db'
 import { DEMO_DATASET } from '@/lib/demo-data'
-import { getCurrentDate, generateId } from '@/lib/utils'
+import { getCurrentDate } from '@/lib/utils'
+
+const projectId = 'proj-default'
 
 export async function POST() {
   try {
-    // Initialize database schema
-    initializeDatabase()
+    // Check whether default project already exists
+    const { data: existing, error: checkError } = await db
+      .from('research_projects')
+      .select('id')
+      .eq('id', projectId)
+      .maybeSingle()
 
-    // Create default project if it doesn't exist
-    const projectId = 'proj-default'
-    const existing = db.prepare('SELECT id FROM research_projects WHERE id = ?').get(projectId)
+    if (checkError) {
+      throw checkError
+    }
 
     if (!existing) {
-      db.prepare(`
-        INSERT INTO research_projects (id, name, description, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?)
-      `).run(projectId, 'DiscoveryOS Default Project', 'Default project for research analysis', getCurrentDate(), getCurrentDate())
+      const now = getCurrentDate()
 
-      // Insert segments
-      for (const segment of DEMO_DATASET.segments) {
-        db.prepare(`
-          INSERT INTO user_segments (id, name, description, value_tier)
-          VALUES (?, ?, ?, ?)
-        `).run(segment.id, segment.name, segment.description, segment.value_tier)
+      // Create default project
+      const { error: projectError } = await db
+        .from('research_projects')
+        .insert({
+          id: projectId,
+          name: 'DiscoveryOS Default Project',
+          description: 'Default project for research analysis',
+          created_at: now,
+          updated_at: now,
+        })
+
+      if (projectError) {
+        throw projectError
       }
 
-      // Insert demo sources
-      for (const source of DEMO_DATASET.sources) {
-        db.prepare(`
-          INSERT INTO research_sources 
-          (id, project_id, title, type, customer_name, segment, date, raw_content, analysis_status, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(
-          source.id,
-          projectId,
-          source.title,
-          source.type,
-          source.customer_name,
-          source.segment,
-          source.date,
-          source.raw_content,
-          'pending',
-          getCurrentDate()
-        )
+      // Insert demo user segments
+      if (DEMO_DATASET.segments.length > 0) {
+        const segments = DEMO_DATASET.segments.map((segment) => ({
+          id: segment.id,
+          name: segment.name,
+          description: segment.description,
+          value_tier: segment.value_tier,
+        }))
+
+        const { error: segmentError } = await db
+          .from('user_segments')
+          .upsert(segments, {
+            onConflict: 'id',
+          })
+
+        if (segmentError) {
+          throw segmentError
+        }
+      }
+
+      // Insert demo research sources
+      if (DEMO_DATASET.sources.length > 0) {
+        const sources = DEMO_DATASET.sources.map((source) => ({
+          id: source.id,
+          project_id: projectId,
+          title: source.title,
+          type: source.type,
+          customer_name: source.customer_name || null,
+          segment: source.segment,
+          date: source.date,
+          raw_content: source.raw_content,
+          analysis_status: 'pending',
+          created_at: now,
+        }))
+
+        const { error: sourcesError } = await db
+          .from('research_sources')
+          .upsert(sources, {
+            onConflict: 'id',
+          })
+
+        if (sourcesError) {
+          throw sourcesError
+        }
       }
     }
 
@@ -54,22 +90,58 @@ export async function POST() {
     })
   } catch (error) {
     console.error('Init error:', error)
-    return NextResponse.json({ error: 'Failed to initialize' }, { status: 500 })
+
+    return NextResponse.json(
+      {
+        error: 'Failed to initialize',
+        details:
+          error instanceof Error
+            ? error.message
+            : String(error),
+      },
+      { status: 500 }
+    )
   }
 }
 
 export async function GET() {
   try {
-    const projectId = 'proj-default'
-    const project = db.prepare('SELECT * FROM research_projects WHERE id = ?').get(projectId)
-    const sourceCount = db.prepare('SELECT COUNT(*) as count FROM research_sources WHERE project_id = ?').get(projectId) as any
+    // Get default project
+    const { data: project, error: projectError } = await db
+      .from('research_projects')
+      .select('*')
+      .eq('id', projectId)
+      .maybeSingle()
+
+    if (projectError) {
+      throw projectError
+    }
+
+    // Count research sources
+    const { count, error: countError } = await db
+      .from('research_sources')
+      .select('*', {
+        count: 'exact',
+        head: true,
+      })
+      .eq('project_id', projectId)
+
+    if (countError) {
+      throw countError
+    }
 
     return NextResponse.json({
       initialized: !!project,
       projectId,
-      sourceCount: sourceCount?.count || 0,
+      sourceCount: count || 0,
     })
   } catch (error) {
-    return NextResponse.json({ initialized: false })
+    console.error('Init GET error:', error)
+
+    return NextResponse.json({
+      initialized: false,
+      projectId,
+      sourceCount: 0,
+    })
   }
 }

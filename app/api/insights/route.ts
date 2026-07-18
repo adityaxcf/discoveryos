@@ -7,19 +7,33 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url)
     const sourceId = searchParams.get('sourceId')
 
-    let query = 'SELECT * FROM atomic_insights'
-    const params: any[] = []
+    let query = db
+      .from('atomic_insights')
+      .select('*')
+      .order('created_at', { ascending: false })
 
     if (sourceId) {
-      query += ' WHERE source_id = ?'
-      params.push(sourceId)
+      query = query.eq('source_id', sourceId)
     }
 
-    const insights = db.prepare(query + ' ORDER BY created_at DESC').all(...params) as AtomicInsight[]
+    const { data, error } = await query
+
+    if (error) {
+      throw error
+    }
+
+    const insights = (data || []) as AtomicInsight[]
 
     return NextResponse.json(insights)
   } catch (error) {
     console.error('Error fetching insights:', error)
-    return NextResponse.json({ error: 'Failed to fetch insights' }, { status: 500 })
+
+    return NextResponse.json(
+      {
+        error: 'Failed to fetch insights',
+        details: error instanceof Error ? error.message : String(error),
+      },
+      { status: 500 }
+    )
   }
 }
