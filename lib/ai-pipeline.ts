@@ -1,11 +1,20 @@
 import OpenAI from 'openai'
 import { generateId, getCurrentDate } from './utils'
-import { ResearchSource, AtomicInsight, Theme, Evidence } from './types'
+import {
+  ResearchSource,
+  AtomicInsight,
+  Theme,
+  Evidence,
+} from './types'
 
-// Use Ollama locally through its OpenAI-compatible API.
-// No paid OpenAI API key is required.
+const apiKey = process.env.OPENAI_API_KEY
+
+if (!apiKey) {
+  console.warn('OPENAI_API_KEY is not configured')
+}
+
 const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
+  apiKey: apiKey || 'missing-key',
 })
 
 const MODEL = 'gpt-4o-mini'
@@ -17,172 +26,279 @@ interface ExtractedInsight {
   confidence: number
 }
 
-interface GroupedTheme {
-  name: string
-  description: string
-  insights: ExtractedInsight[]
-  affected_segments: string[]
-  confidence: number
-}
-
+/**
+ * STAGE 1
+ * Extract atomic customer insights from research sources.
+ *
+ * IMPORTANT:
+ * Unlike the old implementation, AI/API failures are NOT silently
+ * swallowed. If extraction fails, the analysis run will fail and expose
+ * the real error instead of incorrectly reporting "0 insights".
+ */
 export async function extractInsights(
   sources: ResearchSource[]
 ): Promise<AtomicInsight[]> {
+  if (!process.env.OPENAI_API_KEY) {
+    throw new Error(
+      'OPENAI_API_KEY is missing. Add it to Vercel Environment Variables and redeploy.'
+    )
+  }
+
+  if (!sources || sources.length === 0) {
+    throw new Error(
+      'No research sources were provided to the AI extraction pipeline.'
+    )
+  }
+
   const insights: AtomicInsight[] = []
+
+  console.log(
+    `Starting AI extraction for ${sources.length} research sources...`
+  )
 
   for (const source of sources) {
     try {
+      if (!source.raw_content?.trim()) {
+        console.warn(
+          `Skipping source "${source.title}" (${source.id}) because raw_content is empty.`
+        )
+        continue
+      }
+
+      console.log(
+        `Extracting insights from: ${source.title} (${source.id})`
+      )
+
       const response = await openai.chat.completions.create({
         model: MODEL,
+
         messages: [
           {
             role: 'system',
             content: `
 You are a Product Discovery and User Research analyst.
 
-Analyze the provided research source and extract ATOMIC customer insights.
+Analyze the provided customer research and extract atomic customer insights.
+
+An atomic insight represents exactly ONE:
+
+- pain point
+- customer problem
+- complaint
+- unmet need
+- feature request
+- motivation
+- behavioral observation
+- positive product observation
 
 Rules:
-- One insight must represent exactly one specific pain point, problem,
-  feature request, need, complaint, motivation, or positive observation.
-- Do NOT summarize the entire document.
-- Every insight must include a direct supporting quote from the source.
-- Do not invent evidence.
-- Only extract insights clearly supported by the provided content.
 
-Return ONLY a valid JSON object using this exact structure:
+1. Extract only insights directly supported by the research.
+2. Do not invent information.
+3. Do not summarize the entire document into one insight.
+4. Every insight must contain a supporting quote from the research.
+5. Prefer 2-6 meaningful atomic insights when the content supports them.
+6. Ignore irrelevant metadata or boilerplate.
+7. Sentiment must be exactly:
+   "positive", "neutral", or "negative".
+8. Confidence must be between 0 and 1.
+
+Return ONLY valid JSON using exactly this structure:
 
 {
   "insights": [
     {
-      "statement": "A concise atomic customer insight",
-      "quote": "Exact supporting quote from the source",
+      "statement": "Concise atomic customer insight",
+      "quote": "Direct supporting quote from the research",
       "sentiment": "negative",
       "confidence": 0.9
     }
   ]
 }
 
-sentiment must be exactly:
-"positive", "neutral", or "negative"
+If the research genuinely contains no usable customer insight, return:
 
-confidence must be a number between 0 and 1.
-
-If there are multiple distinct problems, return multiple objects inside
-the insights array.
+{
+  "insights": []
+}
             `.trim(),
           },
+
           {
             role: 'user',
             content: `
-Extract atomic customer insights from this research source.
+Analyze this customer research source.
 
-Title: ${source.title}
+TITLE:
+${source.title}
 
-Source Type: ${source.type}
+SOURCE TYPE:
+${source.type}
 
-Customer:
+CUSTOMER:
 ${source.customer_name || 'Anonymous'}
 
-User Segment:
-${source.segment}
+CUSTOMER SEGMENT:
+${source.segment || 'Unknown'}
 
-Research Content:
+RESEARCH CONTENT:
 
 ${source.raw_content}
+
+Extract all meaningful atomic customer insights supported by this content.
 
 Return ONLY the required JSON object.
             `.trim(),
           },
         ],
+
         response_format: {
           type: 'json_object',
         },
-        temperature: 0.3,
+
+        temperature: 0.2,
       })
 
-      const content = response.choices[0]?.message?.content
+      const content =
+        response.choices[0]?.message?.content
 
       if (!content) {
-        console.warn(`No AI response for source ${source.id}`)
-        continue
+        throw new Error(
+          `OpenAI returned an empty response for "${source.title}".`
+        )
       }
+
+      let parsed: any
 
       try {
-        const parsed = JSON.parse(content)
-
-        let sourceInsights: any[] = []
-
-        if (Array.isArray(parsed.insights)) {
-          sourceInsights = parsed.insights
-        } else if (Array.isArray(parsed)) {
-          sourceInsights = parsed
-        } else if (parsed.statement) {
-          sourceInsights = [parsed]
-        }
-
-        for (const insight of sourceInsights) {
-          if (!insight?.statement) continue
-
-          let confidence = Number(insight.confidence)
-
-          if (Number.isNaN(confidence)) {
-            confidence = 0.8
-          }
-
-          confidence = Math.max(0, Math.min(confidence, 1))
-
-          const allowedSentiments = [
-            'positive',
-            'neutral',
-            'negative',
-          ]
-
-          const sentiment = allowedSentiments.includes(
-            insight.sentiment
-          )
-            ? insight.sentiment
-            : 'neutral'
-
-          insights.push({
-            id: generateId(),
-            source_id: source.id,
-            statement: insight.statement,
-            quote:
-              insight.quote ||
-              insight.statement,
-            sentiment,
-            confidence,
-            segment: source.segment,
-            created_at: getCurrentDate(),
-          })
-        }
-
-        console.log(
-          `Extracted ${sourceInsights.length} insights from ${source.title}`
-        )
-      } catch (parseError) {
+        parsed = JSON.parse(content)
+      } catch (error) {
         console.error(
-          `Could not parse Ollama response for ${source.id}:`,
-          content,
-          parseError
+          `Invalid JSON returned for source "${source.title}":`,
+          content
+        )
+
+        throw new Error(
+          `OpenAI returned invalid JSON for "${source.title}".`
         )
       }
+
+      let sourceInsights: ExtractedInsight[] = []
+
+      if (Array.isArray(parsed?.insights)) {
+        sourceInsights = parsed.insights
+      } else if (Array.isArray(parsed)) {
+        sourceInsights = parsed
+      } else if (parsed?.statement) {
+        sourceInsights = [parsed]
+      }
+
+      console.log(
+        `AI returned ${sourceInsights.length} candidate insights for "${source.title}".`
+      )
+
+      for (const insight of sourceInsights) {
+        if (
+          !insight ||
+          typeof insight.statement !== 'string' ||
+          !insight.statement.trim()
+        ) {
+          continue
+        }
+
+        let confidence = Number(insight.confidence)
+
+        if (!Number.isFinite(confidence)) {
+          confidence = 0.8
+        }
+
+        confidence = Math.max(
+          0,
+          Math.min(confidence, 1)
+        )
+
+        const rawSentiment =
+          typeof insight.sentiment === 'string'
+            ? insight.sentiment.toLowerCase()
+            : 'neutral'
+
+        const sentiment:
+          | 'positive'
+          | 'neutral'
+          | 'negative' =
+          rawSentiment === 'positive' ||
+          rawSentiment === 'negative' ||
+          rawSentiment === 'neutral'
+            ? rawSentiment
+            : 'neutral'
+
+        const statement =
+          insight.statement.trim()
+
+        const quote =
+          typeof insight.quote === 'string' &&
+          insight.quote.trim()
+            ? insight.quote.trim()
+            : statement
+
+        insights.push({
+          id: generateId(),
+
+          source_id: source.id,
+
+          statement,
+
+          quote,
+
+          sentiment,
+
+          confidence,
+
+          segment:
+            source.segment || 'Unknown',
+
+          created_at:
+            getCurrentDate(),
+        })
+      }
+
+      console.log(
+        `Successfully processed "${source.title}". Total insights so far: ${insights.length}`
+      )
     } catch (error) {
       console.error(
-        `Error extracting insights from ${source.id}:`,
+        `FATAL AI extraction error for source "${source.title}" (${source.id}):`,
         error
+      )
+
+      const message =
+        error instanceof Error
+          ? error.message
+          : String(error)
+
+      throw new Error(
+        `AI extraction failed for "${source.title}": ${message}`
       )
     }
   }
 
   console.log(
-    `Total extracted insights: ${insights.length}`
+    `AI extraction finished. Total extracted insights: ${insights.length}`
   )
+
+  if (insights.length === 0) {
+    throw new Error(
+      `AI extraction processed ${sources.length} research sources but produced 0 insights. Verify that the sources contain raw_content and check the OpenAI API configuration and Vercel logs.`
+    )
+  }
 
   return insights
 }
 
+/**
+ * STAGE 2
+ * Group atomic insights into themes.
+ */
 export async function groupInsights(
   insights: AtomicInsight[],
   sources: ResearchSource[]
@@ -190,36 +306,35 @@ export async function groupInsights(
   const themes: Theme[] = []
 
   if (insights.length === 0) {
-    console.warn(
-      'No insights available for theme grouping.'
+    throw new Error(
+      'Theme grouping cannot run because no atomic insights were extracted.'
     )
-
-    return themes
   }
 
   try {
     const response =
       await openai.chat.completions.create({
         model: MODEL,
+
         messages: [
           {
             role: 'system',
+
             content: `
 You are a senior Product Discovery researcher.
 
-Your job is to cluster atomic customer insights into meaningful
-product themes.
+Cluster atomic customer insights into meaningful product themes.
 
 Rules:
 
-- Group semantically similar customer problems together.
-- Different wording may describe the same underlying problem.
-- Each insight should belong to ONE primary theme.
-- Themes should represent meaningful product problems or opportunities.
-- Avoid creating overly broad generic themes.
-- Avoid creating a separate theme for every individual insight.
+- Group semantically similar customer problems.
+- Different wording may represent the same underlying problem.
+- Each insight should belong to one primary theme.
+- Themes must represent meaningful product problems or opportunities.
+- Avoid overly broad generic themes.
+- Avoid creating one theme for every individual insight.
 
-Return ONLY valid JSON in this exact format:
+Return ONLY valid JSON:
 
 {
   "themes": [
@@ -231,18 +346,20 @@ Return ONLY valid JSON in this exact format:
   ]
 }
 
-insight_indices must refer to the numbered insights supplied by the user.
+insight_indices must correspond to the numbered insights provided.
             `.trim(),
           },
+
           {
             role: 'user',
+
             content: `
-Group these atomic customer insights into product discovery themes:
+Group these atomic customer insights into meaningful product themes:
 
 ${insights
   .map(
-    (insight, idx) => `
-${idx}.
+    (insight, index) => `
+${index}.
 Statement: ${insight.statement}
 Evidence: "${insight.quote}"
 Segment: ${insight.segment}
@@ -260,71 +377,106 @@ Return ONLY the required JSON object.
           type: 'json_object',
         },
 
-        temperature: 0.3,
+        temperature: 0.2,
       })
 
     const content =
       response.choices[0]?.message?.content
 
     if (!content) {
-      console.warn(
-        'No AI response while grouping themes.'
+      throw new Error(
+        'OpenAI returned an empty response while grouping themes.'
       )
-
-      return themes
     }
 
     const parsed = JSON.parse(content)
 
-    const groupedThemes = Array.isArray(
-      parsed.themes
-    )
-      ? parsed.themes
-      : []
-
-    for (const themeData of groupedThemes) {
-      const indices = Array.isArray(
-        themeData.insight_indices
-      )
-        ? themeData.insight_indices
+    const groupedThemes =
+      Array.isArray(parsed?.themes)
+        ? parsed.themes
         : []
 
-      const themeInsights = indices
-        .map((idx: number) => insights[idx])
-        .filter(Boolean)
+    if (groupedThemes.length === 0) {
+      throw new Error(
+        `Theme grouping returned 0 themes from ${insights.length} insights.`
+      )
+    }
+
+    for (const themeData of groupedThemes) {
+      const indices =
+        Array.isArray(
+          themeData.insight_indices
+        )
+          ? themeData.insight_indices
+          : []
+
+      const themeInsights =
+        indices
+          .map(
+            (index: number) =>
+              insights[index]
+          )
+          .filter(
+            (
+              insight: AtomicInsight | undefined
+            ): insight is AtomicInsight =>
+              Boolean(insight)
+          )
 
       if (themeInsights.length === 0) {
         continue
       }
 
-const affectedSegments: string[] = [
-  ...new Set<string>(
-    themeInsights
-      .map((insight: AtomicInsight) => insight.segment)
-      .filter((segment): segment is string => typeof segment === 'string')
-  ),
-]
+      const affectedSegments: string[] = [
+        ...new Set<string>(
+          themeInsights
+            .map(
+              (insight) =>
+                insight.segment
+            )
+            .filter(
+              (
+                segment
+              ): segment is string =>
+                typeof segment ===
+                  'string' &&
+                segment.length > 0
+            )
+        ),
+      ]
 
-      const avgConfidence =
+      const averageConfidence =
         themeInsights.reduce(
           (sum, insight) =>
-            sum + insight.confidence,
+            sum +
+            Number(
+              insight.confidence || 0
+            ),
           0
         ) /
-        Math.max(themeInsights.length, 1)
+        Math.max(
+          themeInsights.length,
+          1
+        )
 
-      const theme: Theme = {
+      themes.push({
         id: generateId(),
 
         project_id: '',
 
         name:
-          themeData.name ||
-          'Unnamed Theme',
+          typeof themeData.name ===
+            'string' &&
+          themeData.name.trim()
+            ? themeData.name.trim()
+            : 'Unnamed Theme',
 
         description:
-          themeData.description ||
-          'Customer research theme',
+          typeof themeData.description ===
+            'string' &&
+          themeData.description.trim()
+            ? themeData.description.trim()
+            : 'Customer research theme',
 
         insight_count:
           themeInsights.length,
@@ -342,7 +494,7 @@ const affectedSegments: string[] = [
           affectedSegments,
 
         confidence:
-          avgConfidence,
+          averageConfidence,
 
         severity: 'MEDIUM',
 
@@ -353,24 +505,40 @@ const affectedSegments: string[] = [
 
         created_at:
           getCurrentDate(),
-      }
+      })
+    }
 
-      themes.push(theme)
+    if (themes.length === 0) {
+      throw new Error(
+        'Theme grouping produced no valid themes.'
+      )
     }
 
     console.log(
-      `Created ${themes.length} themes from ${insights.length} insights`
+      `Created ${themes.length} themes from ${insights.length} insights.`
     )
+
+    return themes
   } catch (error) {
     console.error(
-      'Error grouping insights:',
+      'Theme grouping failed:',
       error
     )
-  }
 
-  return themes
+    throw new Error(
+      `Theme grouping failed: ${
+        error instanceof Error
+          ? error.message
+          : String(error)
+      }`
+    )
+  }
 }
 
+/**
+ * STAGE 3
+ * Determine severity and business impact.
+ */
 export async function analyzeSeverity(
   themes: Theme[]
 ): Promise<Theme[]> {
@@ -387,22 +555,21 @@ export async function analyzeSeverity(
               content: `
 You are a Product Manager evaluating customer research.
 
-Determine the severity and business impact of the provided product
-problem.
+Determine severity and business impact.
 
 Severity:
 
 HIGH
-- Blocks customers from completing important tasks
+- Blocks important tasks
 - Creates churn risk
 - Causes transaction failure
 - Causes data loss
-- Prevents product adoption
+- Prevents adoption
 
 MEDIUM
 - Creates meaningful frustration
 - Slows workflows
-- Generates repeated support burden
+- Creates repeated support burden
 
 LOW
 - Minor inconvenience
@@ -431,7 +598,7 @@ Return ONLY valid JSON:
 {
   "severity": "HIGH",
   "business_impact": "HIGH",
-  "reasoning": "One concise evidence-based explanation"
+  "reasoning": "Concise evidence-based explanation"
 }
               `.trim(),
             },
@@ -440,7 +607,7 @@ Return ONLY valid JSON:
               role: 'user',
 
               content: `
-Analyze this research theme.
+Analyze this customer research theme.
 
 Theme:
 ${theme.name}
@@ -470,15 +637,22 @@ Classify severity and business impact.
         })
 
       const content =
-        response.choices[0]?.message?.content
+        response.choices[0]
+          ?.message?.content
 
-      if (!content) continue
+      if (!content) {
+        throw new Error(
+          `Empty AI response for theme "${theme.name}".`
+        )
+      }
 
-      const parsed = JSON.parse(content)
+      const parsed =
+        JSON.parse(content)
 
       const severity =
         String(
-          parsed.severity || 'MEDIUM'
+          parsed.severity ||
+            'MEDIUM'
         ).toUpperCase()
 
       const businessImpact =
@@ -502,8 +676,16 @@ Classify severity and business impact.
           : 'MEDIUM'
     } catch (error) {
       console.error(
-        `Error analyzing severity for theme ${theme.id}:`,
+        `Severity analysis failed for "${theme.name}":`,
         error
+      )
+
+      throw new Error(
+        `Severity analysis failed for "${theme.name}": ${
+          error instanceof Error
+            ? error.message
+            : String(error)
+        }`
       )
     }
   }
@@ -511,76 +693,73 @@ Classify severity and business impact.
   return themes
 }
 
+/**
+ * STAGE 4
+ * Calculate deterministic opportunity scores.
+ */
 export async function scoreThemes(
   themes: Theme[]
 ): Promise<Theme[]> {
   for (const theme of themes) {
-    try {
-      const severityScore =
-        theme.severity === 'HIGH'
-          ? 40
-          : theme.severity ===
-              'MEDIUM'
-            ? 25
-            : 10
+    const severityScore =
+      theme.severity === 'HIGH'
+        ? 40
+        : theme.severity ===
+            'MEDIUM'
+          ? 25
+          : 10
 
-      const impactScore =
-        theme.business_impact ===
-        'HIGH'
-          ? 30
-          : theme.business_impact ===
-              'MEDIUM'
-            ? 20
-            : 10
+    const impactScore =
+      theme.business_impact ===
+      'HIGH'
+        ? 30
+        : theme.business_impact ===
+            'MEDIUM'
+          ? 20
+          : 10
 
-      const frequencyScore =
-        Math.min(
-          theme.source_count * 5,
-          20
-        )
-
-      const confidenceScore =
-        Math.min(
-          Math.max(
-            theme.confidence * 10,
-            0
-          ),
-          10
-        )
-
-      const totalScore =
-        Math.min(
-          severityScore +
-            impactScore +
-            frequencyScore +
-            confidenceScore,
-          100
-        )
-
-      theme.opportunity_score =
-        Math.round(totalScore)
-
-      theme.score_breakdown = {
-        severity:
-          severityScore,
-
-        impact:
-          impactScore,
-
-        frequency:
-          frequencyScore,
-
-        confidence:
-          confidenceScore,
-
-        total:
-          theme.opportunity_score,
-      }
-    } catch (error) {
-      console.error(
-        `Error scoring theme ${theme.id}:`,
-        error
+    const frequencyScore =
+      Math.min(
+        theme.source_count * 5,
+        20
       )
+
+    const confidenceScore =
+      Math.min(
+        Math.max(
+          theme.confidence * 10,
+          0
+        ),
+        10
+      )
+
+    const totalScore =
+      Math.min(
+        severityScore +
+          impactScore +
+          frequencyScore +
+          confidenceScore,
+        100
+      )
+
+    theme.opportunity_score =
+      Math.round(totalScore)
+
+    theme.score_breakdown = {
+      severity:
+        severityScore,
+
+      impact:
+        impactScore,
+
+      frequency:
+        frequencyScore,
+
+      confidence:
+        confidenceScore,
+
+      total:
+        theme.opportunity_score,
     }
   }
 
@@ -593,6 +772,13 @@ export async function scoreThemes(
   return themes
 }
 
+/**
+ * STAGE 5
+ * Generate grounded evidence records.
+ *
+ * Evidence comes directly from extracted customer quotes.
+ * The AI is not allowed to invent evidence here.
+ */
 export async function generateEvidence(
   themes: Theme[],
   insights: AtomicInsight[],
@@ -604,91 +790,82 @@ export async function generateEvidence(
   const evidence: Evidence[] = []
 
   for (const theme of themes) {
-    try {
-      /*
-       * Evidence should remain grounded in
-       * the original extracted customer
-       * quotes.
-       *
-       * We do not ask the AI to invent or
-       * rewrite evidence.
-       */
-
-      const segmentMatches =
-        insights.filter((insight) =>
+    const segmentMatches =
+      insights.filter(
+        (insight) =>
           theme.affected_segments.includes(
             insight.segment
           )
-        )
+      )
 
-      const candidateInsights =
-        segmentMatches.length > 0
-          ? segmentMatches
-          : insights
+    const candidateInsights =
+      segmentMatches.length > 0
+        ? segmentMatches
+        : insights
 
-      const uniqueInsights =
-        candidateInsights.filter(
-          (
-            insight,
-            index,
-            array
-          ) =>
-            array.findIndex(
-              (other) =>
-                other.source_id ===
-                  insight.source_id &&
-                other.quote ===
-                  insight.quote
-            ) === index
-        )
+    const uniqueInsights =
+      candidateInsights.filter(
+        (
+          insight,
+          index,
+          array
+        ) =>
+          array.findIndex(
+            (other) =>
+              other.source_id ===
+                insight.source_id &&
+              other.quote ===
+                insight.quote
+          ) === index
+      )
 
-      const selectedInsights =
-        uniqueInsights.slice(0, 3)
+    const selectedInsights =
+      uniqueInsights.slice(0, 3)
 
-      for (const insight of selectedInsights) {
-        const source = sources.get(
+    for (const insight of selectedInsights) {
+      const source =
+        sources.get(
           insight.source_id
         )
 
-        evidence.push({
-          id: generateId(),
+      evidence.push({
+        id: generateId(),
 
-          theme_id:
-            theme.id,
+        theme_id:
+          theme.id,
 
-          source_id:
-            insight.source_id,
+        source_id:
+          insight.source_id,
 
-          quote:
-            insight.quote ||
-            insight.statement,
+        quote:
+          insight.quote ||
+          insight.statement,
 
-          context: source
+        context:
+          source
             ? `${source.title} — ${insight.statement}`
             : insight.statement,
 
-          sentiment:
-            insight.sentiment,
+        sentiment:
+          insight.sentiment,
 
-          created_at:
-            getCurrentDate(),
-        })
-      }
-    } catch (error) {
-      console.error(
-        `Error generating evidence for theme ${theme.id}:`,
-        error
-      )
+        created_at:
+          getCurrentDate(),
+      })
     }
   }
 
   console.log(
-    `Generated ${evidence.length} evidence records`
+    `Generated ${evidence.length} evidence records.`
   )
 
   return evidence
 }
 
+/**
+ * STAGE 6
+ * Generate executive Product Discovery report.
+ */
 export async function generateReport(
   themes: Theme[],
   insights: AtomicInsight[]
@@ -697,13 +874,9 @@ export async function generateReport(
     themes.length === 0 ||
     insights.length === 0
   ) {
-    return `
-No meaningful Product Discovery Report could be generated because
-the analysis did not produce enough customer insights.
-
-Please verify that research sources contain analyzable customer
-feedback and run the analysis again.
-    `.trim()
+    throw new Error(
+      'Cannot generate report because no themes or insights are available.'
+    )
   }
 
   try {
@@ -733,9 +906,9 @@ The report must:
 - Avoid claiming evidence that was not provided
 - Be concise and suitable for roadmap planning
 
-Do not simply summarize the themes.
+Do not simply repeat the themes.
 
-Turn the research findings into actionable product intelligence.
+Turn the findings into actionable product intelligence.
             `.trim(),
           },
 
@@ -743,7 +916,7 @@ Turn the research findings into actionable product intelligence.
             role: 'user',
 
             content: `
-Generate an executive Product Discovery summary from these findings.
+Generate an executive Product Discovery summary.
 
 Total Atomic Customer Insights:
 ${insights.length}
@@ -784,28 +957,41 @@ ${theme.description}
 
 Write approximately 3-5 concise paragraphs covering:
 
-1. The highest-priority customer problems
+1. Highest-priority customer problems
 2. Why they matter
-3. Which customer segments are affected
-4. What should be prioritized
+3. Customer segments affected
+4. What Product Managers should prioritize
 5. What requires further research
             `.trim(),
           },
         ],
 
-        temperature: 0.4,
+        temperature: 0.3,
       })
 
-    return (
+    const report =
       response.choices[0]
-        ?.message?.content || ''
-    )
+        ?.message?.content
+
+    if (!report?.trim()) {
+      throw new Error(
+        'OpenAI returned an empty Product Discovery report.'
+      )
+    }
+
+    return report.trim()
   } catch (error) {
     console.error(
-      'Error generating report:',
+      'Report generation failed:',
       error
     )
 
-    return ''
+    throw new Error(
+      `Report generation failed: ${
+        error instanceof Error
+          ? error.message
+          : String(error)
+      }`
+    )
   }
 }
