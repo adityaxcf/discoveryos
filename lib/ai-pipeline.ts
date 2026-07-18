@@ -5,11 +5,10 @@ import { ResearchSource, AtomicInsight, Theme, Evidence } from './types'
 // Use Ollama locally through its OpenAI-compatible API.
 // No paid OpenAI API key is required.
 const openai = new OpenAI({
-  baseURL: 'http://127.0.0.1:11434/v1',
-  apiKey: 'ollama',
+  apiKey: process.env.OPENAI_API_KEY,
 })
 
-const MODEL = 'llama3.2'
+const MODEL = 'gpt-4o-mini'
 
 interface ExtractedInsight {
   statement: string
