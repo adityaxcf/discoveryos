@@ -2,8 +2,8 @@
   "name": "discoveryos",
   "version": "1.0.0",
   "engines": {
-  "node": "20.x"
-},
+    "node": "26.x"
+  },
   "description": "AI-powered Product Discovery & User Research Intelligence",
   "scripts": {
     "dev": "next dev",
